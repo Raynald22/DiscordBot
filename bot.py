@@ -21,15 +21,33 @@ from googletrans import Translator, constants
 import json
 from textblob import TextBlob
 import urllib
-from youtube_dl import YoutubeDL
+import youtube_dl
 from pycoingecko import CoinGeckoAPI
 import time
 import discordhex
+from cogwatch import watch
+from keep_alive import keep_alive
+
 
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+API = 'https://api.genshin.dev/{}'
+
 cg = CoinGeckoAPI()
+char = API.format("characters/{}")
+art = API.format("artifacts/{}")
+wp = API.format("weapons/{}")
+imgc = 'https://rerollcdn.com/GENSHIN/Characters/{}.png'
+imga = 'https://rerollcdn.com/GENSHIN/Gear/{}.png'
+imgw = 'https://rerollcdn.com/GENSHIN/Weapon/NEW/{}.png'
+
+charlist = requests.get('https://api.genshin.dev/characters').text
+cl = json.loads(charlist)
+artlist = requests.get('https://api.genshin.dev/artifacts').text
+al = json.loads(artlist)
+wplist = requests.get('https://api.genshin.dev/weapons').text
+wl = json.loads(wplist)
 
 def get(element:str):
   path = os.path.abspath("./conf.json")
@@ -42,85 +60,96 @@ client = discord.Client(intents=intents)
 permissions = discord.Permissions.all()
 bot = commands.Bot(command_prefix='?', intents=intents, help_command=None, allowed_mentions=discord.AllowedMentions(everyone=False, users=True, roles=False), permissions=permissions)
 time = datetime.datetime.utcnow()
-# set permissions
+youtube_dl.utils.bug_reports_message = lambda: ''
 
-# flag = True
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0' # bind to ipv4 since ipv6 addresses cause issues sometimes
+}
 
-# @bot.event 
-# async def on_message(message):
-#     if(message.content.startswith('?')):
-#         if(message.content == '?'):
-#             return
-#         if(message.content == '?eth'):
-#             price = get_token_price('ethereum')
-#             await message.channel.send('ETH: Rp.' + str(price))
-#         elif(message.content == '?btc'):
-#             price = get_token_price('bitcoin')
-#             await message.channel.send('BTC: Rp.' + str(price))
-#         elif(message.content == '?doge'):
-#             price = get_token_price('bitcoin')
-#             await message.channel.send('DOGE: Rp.' + str(price))
+ffmpeg_options = {
+    'options': '-vn'
+}
 
-#         else:
-#             token_name = message.content.replace('$', '')
-#             try:
-#                 price = get_token_price(token_name)
-#                 await message.channel.send(token_name.upper() + ': $' + str(price))
+ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
-#             except Exception as e:
-#                 print('Error: ', end =''), print(e)
-#                 await message.channel.send('Unable to fetch price, please use full token name!')
+class YTDLSource(discord.PCMVolumeTransformer):
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title')
+        self.url = ""
 
-#     if(message.content.startswith('?')):
-#         global task
-#         global flag
-        
-#     if(message.content == '?'):
-#         return
+    @classmethod
+    async def from_url(cls, url, *, loop=None, stream=False):
+        loop = loop or asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        if 'entries' in data:
+            # take first item from a playlist
+            data = data['entries'][0]
+        filename = data['title'] if stream else ytdl.prepare_filename(data)
+        return filename
 
-#     if(message.content == '?reset'):
-#         await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='all the coins'))
-#         await message.channel.send('Resetting the monitor!')
-#         tasks.cancel()
-#         flag = True
+@bot.command(name='join', help='Tells the bot to join the voice channel')
+async def join_voice(self, ctx):
+    connected = ctx.author.voice
+    if connected:
+        await connected.channel.connect()
 
-#     else:
-#         token_name = message.content.replace('?', '')
-#         try:
-#             if(flag):
-#                 price = cg.get_price(ids=token_name.lower(), vs_currencies='idr')[token_name.lower()]['idr']
-#                 task =  asyncio.Task(monitor(token_name))
-#                 await message.channel.send('Now monitoring ' + token_name)
-#                 flag = False
-#             else:
-#                 await message.channel.send('Error: cannot monitor two coins at once. ?reset first!')
-        
-#         except Exception as e:
-#             print('Error: ', end =''), print(e)
-#             await message.channel.send('Unable to monitor... please use full token name!')
+@bot.command(name='leave', help='To make the bot leave the voice channel')
+async def leave(ctx):
+    voice_client = ctx.message.guild.voice_client
+    if voice_client.is_connected():
+        await voice_client.disconnect()
+    else:
+        await ctx.send("The bot is not connected to a voice channel.")
 
-# def get_token_price(id):
-#     id = id.lower()
-#     t = time.localtime()
-#     logging_time = time.strftime('%I:%M:%S %p', t)
-#     price = cg.get_price(ids=id, vs_currencies='idr')[id]['idr']
-#     print('[' + logging_time + ']: ' + str(id) + ': Rp.' + str(price))
-#     return price
+@bot.command(name='play', aliases=['p'], help='To play a song from youtube')
+async def play(ctx,url):
+    try :
+        server = ctx.message.guild
+        voice_channel = server.voice_client
+
+        async with ctx.typing():
+            filename = await YTDLSource.from_url(url, loop=bot.loop)
+            voice_channel.play(discord.FFmpegPCMAudio(executable="ffmpeg.exe", source=filename))
+        await ctx.send('**Now playing:** {}'.format(filename))
+    except:
+        await ctx.send("The bot is not connected to a voice channel.")
+
+
+@bot.command(name='pause', help='This command pauses the song')
+async def pause(ctx):
+    voice_client = ctx.message.guild.voice_client
+    if voice_client.is_playing():
+        await voice_client.pause()
+    else:
+        await ctx.send("The bot is not playing anything at the moment.")
     
-# async def monitor(token_name):
-#     while (True):
-#         t = time.localtime()
-#         logging_time = time.strftime('%I:%M:%S %p', t)
+@bot.command(name='resume', help='Resumes the song')
+async def resume(ctx):
+    voice_client = ctx.message.guild.voice_client
+    if voice_client.is_paused():
+        await voice_client.resume()
+    else:
+        await ctx.send("The bot was not playing anything before this. Use play_song command")
 
-#         price = cg.get_price(ids=token_name.lower(), vs_currencies='idr')[token_name.lower()]['idr']
-#         print('[' + logging_time + ']: ', end= '')
-#         print('Monitoring ', end='')
-#         print(token_name + ': $' + str(price))
-#         await changeWatching(price)
-#         await asyncio.sleep(10)
+@bot.command(name='stop', help='Stops the song')
+async def stop(ctx):
+    voice_client = ctx.message.guild.voice_client
+    if voice_client.is_playing():
+        await voice_client.stop()
+    else:
+        await ctx.send("The bot is not playing anything at the moment.")
 
-# async def changeWatching(price):
-#     await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='$' + str(price)))
 
 @bot.event
 async def on_ready():
@@ -152,13 +181,17 @@ async def check_song(ctx, song_name: str):
 #info bot   
 @bot.command(name='infobot', help='Show bot info')
 async def info(ctx):
-    embed = discord.Embed(title='Info', color=discord.Color.dark_blue())
-    embed.add_field(name='Bot name', value=bot.user.name, inline=False)
-    embed.add_field(name='Bot ID', value=bot.user.id, inline=False)
-    embed.add_field(name='Bot prefix', value='?', inline=False)
+    embed = discord.Embed(title='Info Bot')
+    embed.add_field(name='Name', value=bot.user.name, inline=False)
+    embed.add_field(name='ID', value=bot.user.id, inline=False)
+    embed.add_field(name='Prefix', value='?', inline=False)
     #created at
     embed.add_field(name='Created at', value=bot.user.created_at.strftime("%d/%m/%Y"), inline=False)
+    embed.add_field(name='Created by', value='[<@325260673015873548>](https://github.com/Raynald22)', inline=False)
+    embed.add_field(name ='Invite', value = "[Click Here](https://discord.com/api/oauth2/authorize?client_id=765150186431315987&permissions=8&scope=bot)", inline = True)
+
     embed.set_thumbnail(url=bot.user.avatar_url)
+    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar_url)
     # footer made by @Tartaglia with url
     await ctx.send(embed=embed)
 
@@ -167,21 +200,16 @@ async def info(ctx):
 
 @bot.command(name='rickroll', help='Rickrolls the user')
 async def rickroll(ctx):
-    embed=discord.Embed(title="Get Rickrolled, lmao!", url="", description="**That's the Handsome Rick Astley**", color=0x966908)
+    embed=discord.Embed(title="Get Rickrolled, lmao!", url="", description="**That's the Handsome Rick Astley**")
     embed.set_image(url="https://c.tenor.com/u9XnPveDa9AAAAAM/rick-rickroll.gif")
     await ctx.reply(embed=embed) 
 
-# cry command
-@bot.command(name='cry', help='Sends a crying emoji')
-async def cry(ctx):
-    embed=discord.Embed(title="Meme Flip :", url="", description="You made me cry, you dumb", color=0xd69a00)
-    embed.set_thumbnail(url="https://c.tenor.com/vM2hP3AsiP8AAAAM/%E0%A4%87%E0%A4%AE%E0%A5%8B%E0%A4%9C%E0%A5%80-%E0%A4%B0%E0%A5%8B%E0%A4%A8%E0%A4%BE.gif")
-    await ctx.reply(embed=embed)
+
     
 # Info Server command
 @bot.command(name='info', help='Shows the server info')
 async def info(ctx):
-    embed=discord.Embed(title="Server Info", url="", description="Here is the server info", color=0xd69a00)
+    embed=discord.Embed(title="Server Info", url="")
     embed.add_field(name="Server Name", value=ctx.guild.name, inline=False)
     embed.add_field(name="Server ID", value=ctx.guild.id, inline=False)
     embed.add_field(name="Server Owner", value=ctx.guild.owner, inline=False)
@@ -196,9 +224,9 @@ async def info(ctx):
     await ctx.send(embed=embed)
 
 # Info User with avatar command
-@bot.command(name='userinfo', help='Gives info about the user')
+@bot.command(name='userinfo', aliases=['user', 'ui', 'profile'], help='Shows the user info')
 async def userinfo(ctx, member: discord.Member):
-    embed=discord.Embed(title="User Info", url="", color=0xd69a00)
+    embed=discord.Embed(title="User Info", url="")
     embed.add_field(name="Name", value=member.name, inline=False)
     embed.add_field(name="ID", value=member.id, inline=False)
     embed.add_field(name="Nickname", value=member.nick, inline=False)
@@ -243,11 +271,12 @@ async def covid(ctx):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Covid-19 in Indonesia", url="", description="Here is the covid-19 in Indonesia", color=0xd69a00)
-    embed.add_field(name="Positif", value=data[0]['positif'], inline=False)
-    embed.add_field(name="Sembuh", value=data[0]['sembuh'], inline=False)
-    embed.add_field(name="Meninggal", value=data[0]['meninggal'], inline=False)
-    embed.add_field(name="Dirawat", value=data[0]['dirawat'], inline=False)
+    embed=discord.Embed(title="Covid-19 in Indonesia", url="")
+    embed.add_field(name="Positif", value=data[0]['positif'], inline=True)
+    embed.add_field(name="Sembuh", value=data[0]['sembuh'], inline=True)
+    embed.add_field(name="Meninggal", value=data[0]['meninggal'], inline=True)
+    embed.add_field(name="Dirawat", value=data[0]['dirawat'], inline=True)
+    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar_url)
     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/746165212586768586/746165212586768586.png")
     await ctx.reply(embed=embed)
 
@@ -259,17 +288,17 @@ async def wiki(ctx, *, search):
         async with session.get(url) as response:
             data = await response.json()
     if data['type'] == 'disambiguation':
-        embed=discord.Embed(title="Wikipedia", url="", description="Here is the wikipedia", color=0xd69a00)
+        embed=discord.Embed(title="Wikipedia", url="")
         embed.add_field(name="Disambiguation", value="Please choose one of the following", inline=False)
         embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/746165212586768586/746165212586768586.png")
         await ctx.reply(embed=embed)
         for item in data['redirects']:
-            embed=discord.Embed(title="Wikipedia", url="", description="Here is the wikipedia", color=0xd69a00)
+            embed=discord.Embed(title="Wikipedia", url="")
             embed.add_field(name="Disambiguation", value=item['to'], inline=False)
             embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/746165212586768586/746165212586768586.png")
             await ctx.reply(embed=embed)
     else:
-        embed=discord.Embed(title="Wikipedia", url="", description=data['title'], color=0xd69a00)
+        embed=discord.Embed(title="Wikipedia", url="", description=data['title'])
         embed.add_field(name="Deskripsi", value=data['extract'], inline=False)
         embed.set_image(url=data['originalimage']['source'])
         embed.add_field(name="URL", value=data['content_urls']['desktop']['page'], inline=False)
@@ -280,20 +309,20 @@ async def wiki(ctx, *, search):
 #server icon command
 @bot.command(name='servericon', help='Gives the server icon')
 async def servericon(ctx):
-    embed=discord.Embed(title="Server Icon", url="", color=0xd69a00)
+    embed=discord.Embed(title="Server Icon", url="")
     embed.set_image(url=ctx.guild.icon_url)
     await ctx.reply(embed=embed)
 
 #avatar member command
 @bot.command(name='avatar', help='Gives the avatar of the member')
 async def avatar(ctx, member: discord.Member):
-    embed=discord.Embed(title="Avatar", url="", color=0xd69a00)
+    embed=discord.Embed(title="Avatar", url="")
     embed.set_image(url=member.avatar_url)
     await ctx.reply(embed=embed)
 
 # purge message command
 @bot.command(name='purge', delete_after=3)
-@commands.has_permissions(manage_messages=True)
+@commands.has_role('ORANG DALAM')
 async def purge(ctx, limit=100, member: discord.Member=None):
     await ctx.message.delete()
     msg = []
@@ -314,13 +343,13 @@ async def purge(ctx, limit=100, member: discord.Member=None):
     
 
 # get list trending movie command
-@bot.command(name='trending', help='Gives the list of trending movies')
+@bot.command(name='trendingmovie', help='Gives the list of trending movies')
 async def trending(ctx):
     url = "https://api.themoviedb.org/3/trending/movie/week?api_key=b4f4d1c2f91c4d46cc9f8dfd603919ff"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Trending Movies", url="", description="Here is the list of trending movies", color=0xd69a00)
+    embed=discord.Embed(title="Trending Movies", url="")
     for i in range(len(data['results'])):
         embed.add_field(name=f'{i+1} - {data["results"][i]["title"]}', value=f'Rating: {data["results"][i]["vote_average"]}', inline=False)
         #release date
@@ -334,7 +363,7 @@ async def movie(ctx, *, movie: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Movie Info", url="", color=0xd69a00)
+    embed=discord.Embed(title="Movie Info", url="")
     embed.add_field(name="Title", value=data['results'][0]['title'], inline=False)
     embed.add_field(name="Overview", value=data['results'][0]['overview'], inline=False)
     embed.add_field(name="Rating", value=data['results'][0]['vote_average'], inline=False)
@@ -350,28 +379,28 @@ async def meme(ctx):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Meme", url="", color=0xd69a00)
+    embed=discord.Embed(title="Meme", url="")
     embed.set_image(url=data['url'])
     await ctx.reply(embed=embed)
 
 # filter avatar to grey
 @bot.command(name='grey', help='Gives the avatar of the member with the specified filter')
 async def avatarfilter(ctx, member: discord.Member):
-    embed=discord.Embed(title="Avatar", url="", color=0xd69a00)
+    embed=discord.Embed(title="Avatar", url="")
     embed.set_image(url=f"https://res.cloudinary.com/demo/image/fetch/w_200,e_grayscale/{member.avatar_url}?size=1024")
     await ctx.reply(embed=embed)
 
 # filter avatar to 90 degrees
 @bot.command(name='flip', help='Gives the avatar of the member with the specified filter')
 async def avatarfilter(ctx, member: discord.Member):
-    embed=discord.Embed(title="Avatar", url="", color=0xd69a00)
+    embed=discord.Embed(title="Avatar", url="")
     embed.set_image(url=f"https://res.cloudinary.com/demo/image/fetch/w_200,a_90/{member.avatar_url}?size=1024")
     await ctx.reply(embed=embed)
 
 # get today's date
 @bot.command(name='today', help='Gives the current date')
 async def date(ctx):
-    embed=discord.Embed(title="Date", url="", color=0xd69a00)
+    embed=discord.Embed(title="Date", url="")
     # get day
     embed.add_field(name="Day", value=datetime.datetime.now().strftime("%A"), inline=False)
     embed.add_field(name="Today's Date", value=datetime.datetime.now().strftime("%d-%m-%Y"), inline=False)
@@ -407,11 +436,12 @@ async def weather(ctx, *, city: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Weather", url="", color=0xd69a00)
+    embed=discord.Embed(title="Weather", url="")
     # reqested by author name, avatar, time
     embed.set_footer(text=ctx.author.name, icon_url = ctx.author.avatar_url)
     embed.add_field(name="City", value=city, inline=False)
-    embed.add_field(name="Temperature", value=data['main']['temp']-273.15, inline=False)
+    #format temperature decimal
+    embed.add_field(name="Temperature", value=f'{data["main"]["temp"]-273.15:.2f} °C', inline=False)
     embed.add_field(name="Description", value=data['weather'][0]['main'], inline=False)
     embed.add_field(name="Wind Speed", value=data['wind']['speed'], inline=False)
     embed.add_field(name="Humidity", value=data['main']['humidity'], inline=False)
@@ -429,7 +459,7 @@ async def quote(ctx):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="", url="", color=0xd69a00)
+    embed=discord.Embed(title="", url="")
     
     embed.add_field(name="Quote", value=data["*quoteText*"], inline=False)
     embed.add_field(name="Author", value=data["quoteAuthor"], inline=False)
@@ -442,7 +472,7 @@ async def pokemon(ctx, *, pokemon: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Pokemon", url="", color=0xd69a00)
+    embed=discord.Embed(title="Pokemon", url="")
     # get pokemon name uppercase
     embed.add_field(name="Name", value=data['name'].upper(), inline=False)
     embed.add_field(name="Weight", value=data['weight'], inline=False)
@@ -459,7 +489,7 @@ async def pokemon(ctx, *, pokemon: str):
 async def translate(ctx, *, text: str):
     translator = Translator()
     result = translator.translate(text, src='id', dest='en')
-    embed=discord.Embed(title="Translation", url="", color=0xd69a00)
+    embed=discord.Embed(title="Translation", url="")
     embed.add_field(name="Translated Text", value=result.text, inline=False)
     await ctx.reply(embed=embed)
 
@@ -470,14 +500,14 @@ async def gif(ctx):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="GIF", url="", color=0xd69a00)
+    embed=discord.Embed(title="GIF", url="")
     embed.set_image(url=data['results'][0]['media'][0]['gif']['url'])
     await ctx.reply(embed=embed)
 
 # send color
 @bot.command(name='randomcolor', help='Send random color')
 async def color(ctx):
-    embed=discord.Embed(title="", url="", color=0xd69a00)
+    embed=discord.Embed(title="", url="")
     embed.set_footer(text="Random Color")
     embed.set_image(url=f"https://dummyimage.com/200x200/{random.randint(0,16777215)}/ffffff.png&text={random.randint(0,16777215)}")
     embed.add_field(name="Color", value=f"#{random.randint(0,16777215):06x}", inline=False)
@@ -488,9 +518,9 @@ async def color(ctx):
 @bot.command(name='ping', help='Ping the bot')
 async def ping(ctx):
     
-    embed=discord.Embed(title="", url="", color=0xd69a00)
-    embed.set_footer(text=f"{ctx.author.name}", icon_url = ctx.author.avatar_url)
+    embed=discord.Embed(title="", url="")
     embed.add_field(name="Ping", value=f"{round(bot.latency * 1000)}ms", inline=False)
+    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar_url)
     await ctx.reply(embed=embed)
 
 
@@ -514,8 +544,9 @@ async def roll(ctx, dice: str):
     await ctx.send(result)
 
 
-@bot.command(name='say', delete_after=0)
+@bot.command(name='say', delete_after=2)
 async def say(ctx, *, text: str):
+    await ctx.message.delete()
     await ctx.send(text)
 
 
@@ -545,16 +576,248 @@ async def rps(ctx, *, choice: str):
     else:
         await ctx.send("slh")
 
-@bot.command(name='joke', help='sends a joke')
-async def joke(ctx):
-    url = "https://official-joke-api.appspot.com/random_joke"
+@bot.command(name='anime')
+async def anime(ctx, *, anime: str):
+    url = "https://api.jikan.moe/v3/search/anime?q=" + anime
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             data = await response.json()
-    embed=discord.Embed(title="Joke", url="", color=0xd69a00)
-    embed.add_field(name="Setup", value=data['setup'], inline=False)
-    embed.add_field(name="Punchline", value=data['punchline'], inline=False)
+    embed=discord.Embed(title="Anime", url="")
+    embed.add_field(name="Title", value=data['results'][0]['title'], inline=False)
+    embed.add_field(name="Type", value=data['results'][0]['type'], inline=False)
+    embed.add_field(name="Episodes", value=data['results'][0]['episodes'], inline=False)
+    embed.add_field(name="Score", value=data['results'][0]['score'], inline=False)
+    embed.add_field(name="Synopsis", value=data['results'][0]['synopsis'], inline=False)
+    embed.add_field(name="Rated", value=data['results'][0]['rated'], inline=False)
+    embed.add_field(name="Link", value=data['results'][0]['url'], inline=False)
+    embed.set_thumbnail(url=f"{data['results'][0]['image_url']}")
     await ctx.reply(embed=embed)
+
+# search anime character
+@bot.command(name='searchanimechar')
+async def character(ctx, *, character: str):
+    url = "https://api.jikan.moe/v3/search/character?q=" + character
+    async with aiohttp.ClientSession() as session:  
+        async with session.get(url) as response:
+            data = await response.json()
+    embed=discord.Embed(title="Character", url="")
+    embed.add_field(name="Name", value=data['results'][0]['name'], inline=False)
+    embed.set_image(url=f"{data['results'][0]['image_url']}")
+    #if data not found
+    if data['results'] == []:
+        await ctx.reply("gd")
+    else:
+        await ctx.reply(embed=embed)
+
+# translate text by emoji
+
+
+# translate id to spain
+@bot.command(name='translateidtoes', help='Translate text to english')
+async def translate(ctx, *, text: str):
+    translator = Translator()
+    result = translator.translate(text, src='id', dest='es')
+    embed=discord.Embed()
+    embed.add_field(name="Translated Text", value=result.text, inline=False)
+    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar_url)
+
+    await ctx.reply(embed=embed)
+
+#calculator
+@bot.command(name='calc')
+async def calc(ctx, *, equation: str):
+    if equation.startswith('-') or equation.startswith('+'):
+        await ctx.reply('Please enter a valid equation')
+    else:
+        try:
+            result = eval(equation)
+            await ctx.reply(result)
+        except Exception:
+            await ctx.reply('Please enter a valid equation')
+
+#create invite link
+@bot.command(name='invitelink')
+async def invite(ctx):
+    await ctx.reply(f"https://discord.com/api/oauth2/authorize?client_id=765150186431315987&permissions=8&scope=bot")
+
+
+@bot.command(name='genshin')
+async def character(ctx, *, arg=None):
+#  if arg2 == None:  
+  if arg == None:
+      embeded = discord.Embed(title="Character List")
+      for i in cl:
+        response = requests.get(char.format(i)).text
+        data = json.loads(response)
+        embeded.add_field(name=i.title().replace("-", " "), value="{} Star | {}".format(data['rarity'],data['vision']), inline=True)
+      await ctx.send(embed=embeded)
+
+  elif arg != None:
+      arg = arg.replace(" ", "-").lower()
+      if arg in cl:
+        response = requests.get(char.format(arg)).text
+        data = json.loads(response)
+        embeded = discord.Embed(title=data['name'.replace("-", "")],description=data['description'])
+        if arg == "traveler-geo":
+          embeded.set_thumbnail(url='https://rerollcdn.com/GENSHIN/Characters/Traveler%20(Geo).png')
+        elif arg == "traveler-anemo":
+          embeded.set_thumbnail(url='https://rerollcdn.com/GENSHIN/Characters/Traveler%20(Anemo).png') 
+        else:
+          embeded.set_thumbnail(url=imgc.format(data['name'].replace(" ", "%20")))
+        embeded.add_field(name="Vision", value=data['vision'], inline=True)
+        embeded.add_field(name="Weapon", value=data['weapon'], inline=True)
+        rrt = int(data['rarity'])
+        strg = "".join([" :star: ".format(x, x*2) for x in range(rrt)])
+        embeded.add_field(name="Rarity", value=strg, inline=True)
+        for skillTalents in data['skillTalents']:
+          embeded.add_field(name="{} : {}".format(skillTalents['unlock'], skillTalents['name']), value=skillTalents['description'].replace("\n\n", "\n"), inline=False)
+        for passiveTalents in data['passiveTalents']:
+          embeded.add_field(name="Passive Skill: {} \n({})".format(passiveTalents['name'], passiveTalents['unlock']), value=passiveTalents['description'].replace("\n\n", "\n"), inline=True)
+        await ctx.send(embed=embeded)
+      else:
+        await ctx.send("{} not Found!".format(arg).title().replace("-", " "))
+
+@bot.command(name='talent')
+async def talent(ctx, *, arg=None):
+  if arg == None:
+      await ctx.send("Type ?talent CharacterName".format(arg).title().replace("-", " "))
+
+  elif arg != None:
+      arg = arg.replace(" ", "-").lower()
+      if arg in cl:
+        response = requests.get(char.format(arg)).text
+        data = json.loads(response)
+        embeded = discord.Embed(title=data['name'.replace("-", "")],description=data['description'])
+        if arg == "traveler-geo":
+          embeded.set_thumbnail(url='https://rerollcdn.com/GENSHIN/Characters/Traveler%20(Geo).png')
+        elif arg == "traveler-anemo":
+          embeded.set_thumbnail(url='https://rerollcdn.com/GENSHIN/Characters/Traveler%20(Anemo).png') 
+        else:
+          embeded.set_thumbnail(url=imgc.format(data['name'])) 
+        embeded.add_field(name="Vision", value=data['vision'], inline=True)
+        embeded.add_field(name="Weapon", value=data['weapon'], inline=True)
+        rrt = int(data['rarity'])
+        strg = "".join([" :star: ".format(x, x*2) for x in range(rrt)])
+        embeded.add_field(name="Rarity", value=strg, inline=True)
+        for skillTalents in data['skillTalents']:
+          embeded.add_field(name="{} : {}".format(skillTalents['unlock'], skillTalents['name']), value=skillTalents['description'].replace("\n\n", "\n"), inline=False)
+          for upgrades in skillTalents['upgrades']:
+            embeded.add_field(name="{}".format(upgrades['name']), value=upgrades['value'], inline=True)
+        # for passiveTalents in data['passiveTalents']:
+        #   embeded.add_field(name="Passive Skill: {} \n({})".format(passiveTalents['name'], passiveTalents['unlock']), value=passiveTalents['description'].replace("\n\n", "\n"), inline=True)
+
+        await ctx.send(embed=embeded)
+      else:
+        await ctx.send("{} not Found!".format(arg).title().replace("-", " "))
+
+@bot.command(name='typechar')
+async def cons(ctx, *, arg=None):
+  if arg == None:
+      await ctx.send("Type the Character!".format(arg).title())
+
+  elif arg != None:
+      arg = arg.replace(" ", "-").lower()
+      if arg in cl:
+        response = requests.get(char.format(arg)).text
+        data = json.loads(response)
+        embeded = discord.Embed(title=data['name'.replace("-", "")],description=data['description'])
+        if arg == "traveler-geo":
+          embeded.set_thumbnail(url='https://rerollcdn.com/GENSHIN/Characters/Traveler%20(Geo).png')
+        elif arg == "traveler-anemo":
+          embeded.set_thumbnail(url='https://rerollcdn.com/GENSHIN/Characters/Traveler%20(Anemo).png') 
+        else:
+          embeded.set_thumbnail(url=imgc.format(data['name'])) 
+        embeded.add_field(name="Vision", value=data['vision'], inline=True)
+        embeded.add_field(name="Weapon", value=data['weapon'], inline=True)
+        rrt = int(data['rarity'])
+        strg = "".join([" :star: ".format(x, x*2) for x in range(rrt)])
+        embeded.add_field(name="Rarity", value=strg, inline=True)
+        for i in range(6) :
+          embeded.add_field(name=data['constellations'][i]['unlock'], value="{} \n {}".format(data['constellations'][i]['name'], data['constellations'][i]['description']), inline=True)
+
+        await ctx.send(embed=embeded)
+      else:
+        await ctx.send("{} not Found!".format(arg).title().replace("-", " "))
+
+@bot.command(name='artifact')
+async def artifact(ctx, *, arg=None): 
+    if arg == None:
+      def listToString(wl):  
+        str1 = "\n" 
+        return (str1.join(wl))  
+      artlist = requests.get('https://api.genshin.dev/artifacts').text
+      al = json.loads(artlist) 
+      embeded = discord.Embed(title="Artifact List", description=listToString(al).title().replace("-", " "))
+      await ctx.send(embed=embeded)
+
+     ## # Use this if you wanted to show List and Showing some info
+     ## # Not recommended because load to many data
+      # embeded = discord.Embed(title="Artifact List")
+      # artlist = requests.get('https://api.genshin.dev/artifacts').text
+      # al = json.loads(artlist)
+      # for i in al:
+      #   response = requests.get(art.format(i)).text
+      #   data = json.loads(response)
+      #   embeded.add_field(name=i.title().replace("-", " "), value="2P: {}\n4P: {}".format(data['2-piece_bonus'], data['4-piece_bonus']), inline=True)
+      # await ctx.send(embed=embeded)
+
+    elif arg != None:
+      arg = arg.replace(" ", "-").lower()
+      artlist = requests.get('https://api.genshin.dev/artifacts').text
+      al = json.loads(artlist)
+      if arg in al:
+        response = requests.get(art.format(arg)).text
+        data = json.loads(response)
+        embeded = discord.Embed(title=data['name'])
+        embeded.set_thumbnail(url=imga.format(data['name'].lower().replace(" ", "_")))
+        rrt = int(data['max_rarity'])
+        strg = "".join([" :star: ".format(x, x*2) for x in range(rrt)])
+        embeded.add_field(name="Max Rarity", value=strg, inline=True) 
+        embeded.add_field(name="2 Pieces", value=data['2-piece_bonus'], inline=False)
+        embeded.add_field(name="4 Pieces", value=data['4-piece_bonus'], inline=False)
+        await ctx.send(embed=embeded)
+      else:
+        await ctx.send("{} not Found!".format(arg).title().replace("-", " "))
+
+@bot.command(name='weapon')
+async def weapon(ctx, *, arg=None): 
+    if arg == None:
+      def listToString(wl):  
+        str1 = "\n" 
+        return (str1.join(wl))  
+      wplist = requests.get('https://api.genshin.dev/weapons').text
+      wl = json.loads(wplist)  
+      embeded = discord.Embed(title="Weapon List", description=listToString(wl).title().replace("-", " "))
+      await ctx.send(embed=embeded)
+
+      ## # Same as artifact, but Weapons hold to many data, so it only shown a part of it
+      # for i in wl:
+      #   response = requests.get(wp.format(i)).text
+      #   data = json.loads(response)
+      #   embeded.add_field(name=i.title().replace("-", " "), value="Type: {}".format(data['type']), inline=True)
+      # await ctx.send(embed=embeded)
+
+    elif arg != None:
+      arg = arg.replace(" ", "-").lower()
+      wplist = requests.get('https://api.genshin.dev/weapons').text
+      wl = json.loads(wplist)  
+      if arg in wl:
+        response = requests.get(wp.format(arg)).text
+        data = json.loads(response)
+        embeded = discord.Embed(title=data['name'])
+        print(data['name'])
+        embeded.set_thumbnail(url=imgw.format(data['name'].replace(" ", "_")))
+        embeded.add_field(name="Type", value=data['type'], inline=True)
+        embeded.add_field(name="Base ATK", value=data['baseAttack'], inline=True) 
+        rrt = int(data['rarity'])
+        strg = "".join([" :star: ".format(x, x*2) for x in range(rrt)])
+        embeded.add_field(name="Rarity", value=strg, inline=True)
+        embeded.add_field(name="Sub Stat", value=data['subStat'], inline=True)
+        embeded.add_field(name="Where to Get", value=data['location'], inline=True)
+        embeded.add_field(name="Passive: {}".format(data['passiveName']), value=data['passiveDesc'], inline=False)
+        await ctx.send(embed=embeded)
+      else:
+        await ctx.send("{} not Found!".format(arg).title().replace("-", " "))
 
 #pretty embed for help
 @bot.command(name='help')
@@ -563,14 +826,18 @@ async def help(ctx):
     # set author
     embed.set_author(name=bot.user.name + ' • Help', url="", icon_url = bot.user.avatar_url)
     embed.set_thumbnail(url=bot.user.avatar_url)
-    embed.add_field(name = '__**Mods**__', value= "`ping`, `info`, `userinfo` <user>, `servericon`, `avatar`", inline = True)
-    embed.add_field(name = '__**Fun**__', value = "`pokemon` <name>, `animegif`, `flip` <user>, `grey` <user>, `meme`, ", inline = True)
-    embed.add_field(name = '__**Utilities**__', value = "`weater` <city>, `randomcolor`, `translate` <text>, `quote`, `today`, `movie`, `trending`, `wiki` <text>, `covid`", inline = True)
+    embed.add_field(name = '__**🔧 Mods**__', value= "`ping`, `info`, `userinfo` <user>, `servericon`, `avatar`", inline = False)
+    embed.add_field(name = '__**😋 Fun**__', value = "`pokemon` <name>, `animegif`, `flip` <user>, `grey` <user>, `meme`, ", inline = False)
+    embed.add_field(name = '__**⚙️ Utilities**__', value = "`weater` <city>, `randomcolor`, `translate` <text>, `translatetoes <text>`, `quote`, `today`, `movie`, `trendingmovie`, `wiki` <text>, `covid`, `anime` <anime>, `calc`, `searchanimechar <char anime>`", inline = False)
     
-    # embed.add_field(name = 'Red Team ', value = "Something", inline = True)
+    embed.add_field(name = '__**🎮 Online Games**__', value = "`genshin` <char>, `weapon` <name>, `typechar` <char>, `artifact` <name>, `talent` <char>", inline = False)
     # embed.add_field(name = 'Champion', value = "Something", inline = True)
     # embed.add_field(name = 'Rank', value = "Something", inline = True)
-    embed.set_footer(text=ctx.author.name, icon_url = ctx.author.avatar_url)    
+    timestamp = datetime.datetime.utcnow().strftime("%d/%m/%Y") + " " + datetime.datetime.utcnow().strftime("%H:%M:%S")
+    embed.set_footer(text=f'Requested by {ctx.author.name} • {timestamp}', icon_url=ctx.author.avatar_url)
+
+    #else:
+    #  embed.set_footer(text=time.strftime("%d/%m/%Y") + " | " + time.strftime("%H:%M:%S") + " | " + time.strftime("%A"))
     await ctx.send(embed=embed)
 
 
